@@ -1,0 +1,18 @@
+# ─── Secrets — NEVER commit these ────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+env/
+
+# ─── Sample / test data ───────────────────────────────────────────────────────
+sample_data.xlsx
+
+# ─── OS clutter ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
