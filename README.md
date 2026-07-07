@@ -57,12 +57,12 @@ Create `.streamlit/secrets.toml` (never commit this file):
 gemini_api_key = "your-gemini-api-key-here"
 
 # Optional — HuggingFace
-# hf_token = "hf_..."
-# hf_model = "mistralai/Mistral-7B-Instruct-v0.3"
+# hf_token = 
+# hf_model = 
 
 # Optional — Ollama (local)
-# ollama_url = "http://localhost:11434"
-# ollama_model = "llama3"
+# ollama_url = 
+# ollama_model = 
 
 # Optional — LLM provider default
 # llm_provider = "Gemini (free API)"
@@ -88,10 +88,8 @@ python -m streamlit run app.py
 
 ### Example questions
 ```
-Show top 5 products by revenue
 Which product has the highest trend score?
 Rank each product by combining trend score and revenue — top 10
-How many unique categories are there?
 Show products where revenue is greater than 50000 then find average trend score
 ```
 
