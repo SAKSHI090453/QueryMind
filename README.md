@@ -153,6 +153,3 @@ All 37 tests cover: `dtype_to_sql`, `build_schema_from_df`, `build_prompt`, `par
 
 ---
 
-## 📄 License
-
-MIT License — free to use, modify, and distribute.
