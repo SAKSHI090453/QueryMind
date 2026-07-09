@@ -5,41 +5,170 @@ import requests
 import re
 import sqlite3
 import time
+import json
+import io
+from pathlib import Path
 from datetime import datetime
 
 st.set_page_config(
-    page_title="SQL Agent (PostgreSQL / Greenplum)",
-    page_icon="🗄️",
+    page_title="QueryMind — Ask Your Data in Plain English",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# ─── Persistence paths ─────────────────────────────────────────────────────────
+_BASE = Path(__file__).parent
+HISTORY_FILE = _BASE / "query_history.json"
+SAVED_FILE   = _BASE / "saved_queries.json"
+
+def _load_json(path: Path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+def _save_json(path: Path, data):
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 st.markdown("""
 <style>
+    /* ── Global ── */
+    @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Fredoka:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Nunito', sans-serif; background: #f0f9ff; }
+
+    /* ── Hero banner ── */
+    .hero-banner {
+        background: linear-gradient(135deg, #bae6fd 0%, #e0f2fe 100%);
+        color: #0c4a6e;
+        padding: 1.8rem 2rem 1.4rem;
+        border-radius: 16px;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 6px 28px rgba(14,165,233,0.25);
+    }
+    .hero-banner h1 { margin: 0; font-size: 2.5rem; font-weight: 700; letter-spacing: -0.5px; font-family: 'Fredoka', sans-serif; }
+    .hero-banner p  { margin: 0.3rem 0 0; font-size: 0.95rem; opacity: 0.9; }
+
+    /* ── Metric cards ── */
+    .metric-row { display: flex; gap: 14px; margin-bottom: 1.2rem; flex-wrap: wrap; }
+    .metric-card {
+        flex: 1; min-width: 130px;
+        background: white;
+        border: 1.5px solid #bae6fd;
+        border-radius: 14px;
+        padding: 0.9rem 1.1rem;
+        text-align: center;
+        box-shadow: 0 2px 10px rgba(14,165,233,0.1);
+    }
+    .metric-card .val { font-size: 1.7rem; font-weight: 800; color: #0284c7; line-height: 1.2; }
+    .metric-card .lbl { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 3px; font-weight: 600; }
+
+    /* ── Status badges ── */
+    .badge {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 5px 14px; border-radius: 20px;
+        font-size: 0.8rem; font-weight: 700;
+    }
+    .badge-green  { background: #e0f2fe; color: #075985; border: 1.5px solid #7dd3fc; }
+    .badge-blue   { background: #ede9fe; color: #5b21b6; border: 1.5px solid #c4b5fd; }
+    .badge-teal   { background: #ccfbf1; color: #134e4a; border: 1.5px solid #5eead4; }
+    .badge-orange { background: #fff7ed; color: #c2410c; border: 1.5px solid #fdba74; }
+
+    /* ── Logic box ── */
     .logic-box {
-        background-color: #f0f7ff;
-        border-left: 4px solid #2196F3;
-        padding: 0.75rem 1rem;
-        border-radius: 4px;
+        background: linear-gradient(135deg, #e0f2fe, #fff7ed);
+        border-left: 4px solid #0ea5e9;
+        padding: 0.9rem 1.2rem;
+        border-radius: 0 12px 12px 0;
         margin-bottom: 0.5rem;
         font-size: 0.95rem;
+        line-height: 1.65;
+        color: #0c1a3a;
     }
+
+    /* ── Section labels ── */
     .section-label {
-        font-weight: 600;
-        font-size: 0.85rem;
-        color: #555;
+        font-weight: 800;
+        font-size: 0.76rem;
+        color: #0284c7;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-bottom: 0.3rem;
+        letter-spacing: 0.1em;
+        margin-bottom: 0.25rem;
     }
-    .mode-badge {
+
+    /* ── Result table ── */
+    .stDataFrame { border-radius: 12px; overflow: hidden; border: 1px solid #bae6fd; }
+
+    /* ── Step badge ── */
+    .step-badge {
         display: inline-block;
-        padding: 2px 10px;
+        background: linear-gradient(90deg, #0ea5e9, #f97316);
+        color: white;
+        padding: 3px 13px;
         border-radius: 12px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+        margin-bottom: 5px;
     }
+
+    /* ── Agentic info box ── */
+    .agent-box {
+        background: linear-gradient(135deg, #fff7ed, #e0f2fe);
+        border-left: 4px solid #f97316;
+        padding: 0.75rem 1rem;
+        border-radius: 0 12px 12px 0;
+        font-size: 0.88rem;
+        color: #7c2d12;
+        margin: 0.5rem 0;
+        font-weight: 600;
+    }
+
+    /* ── Saved query pill ── */
+    .saved-pill {
+        background: #e0f2fe;
+        border: 1px solid #7dd3fc;
+        border-radius: 8px;
+        padding: 0.45rem 0.75rem;
+        font-size: 0.83rem;
+        color: #075985;
+        margin-bottom: 4px;
+        cursor: pointer;
+    }
+
+    /* ── Sidebar ── */
+    section[data-testid="stSidebar"] > div { background: #f0f9ff; }
+    section[data-testid="stSidebar"] * { color: #0c1a3a !important; }
+    section[data-testid="stSidebar"] .stRadio label { font-size: 0.9rem; color: #0c1a3a !important; }
+    section[data-testid="stSidebar"] .stTextInput input,
+    section[data-testid="stSidebar"] .stNumberInput input { background: #ffffff; color: #0c1a3a !important; border: 1.5px solid #7dd3fc; border-radius: 8px; }
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] span { color: #0c1a3a !important; }
+    section[data-testid="stSidebar"] .stSuccess p { color: #065f46 !important; }
+    section[data-testid="stSidebar"] .stError p  { color: #7f1d1d !important; }
+    section[data-testid="stSidebar"] .stCaption  { color: #64748b !important; }
+
+    /* ── File uploader ── */
+    [data-testid="stFileUploader"] > label { color: #0c1a3a !important; font-weight: 700; }
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"],
+    [data-testid="stFileUploadDropzone"] {
+        background: #e0f2fe !important;
+        border: 2px dashed #0284c7 !important;
+        border-radius: 10px !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"] *,
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"] p,
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"] span,
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"] small,
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"] div,
+    section[data-testid="stSidebar"] [data-testid="stFileUploadDropzone"] button { color: #0c1a3a !important; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,7 +178,11 @@ if "conn" not in st.session_state:
 if "schema_text" not in st.session_state:
     st.session_state.schema_text = ""
 if "history" not in st.session_state:
-    st.session_state.history = []
+    st.session_state.history = _load_json(HISTORY_FILE, [])
+if "saved_queries" not in st.session_state:
+    st.session_state.saved_queries = _load_json(SAVED_FILE, [])
+if "prefill_question" not in st.session_state:
+    st.session_state.prefill_question = ""
 if "excel_df" not in st.session_state:
     st.session_state.excel_df = None
 if "excel_table_name" not in st.session_state:
@@ -62,6 +195,8 @@ if "selected_tables" not in st.session_state:
     st.session_state.selected_tables = []
 if "data_source" not in st.session_state:
     st.session_state.data_source = None
+if "error_log" not in st.session_state:
+    st.session_state.error_log = []
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -83,7 +218,7 @@ def build_schema_from_df(df: pd.DataFrame, table_name: str) -> str:
     return f"Table: {table_name}\nColumns: {cols}"
 
 
-def build_prompt(schema: str, question: str, data_source: str = "postgres") -> str:
+def build_prompt(schema: str, question: str, data_source: str = "postgres", error_context: str = "", verbose_reasoning: bool = False) -> str:
     if data_source == "excel":
         db_note = (
             "SQLite (in-memory). "
@@ -93,6 +228,20 @@ def build_prompt(schema: str, question: str, data_source: str = "postgres") -> s
         )
     else:
         db_note = "PostgreSQL-compatible SQL syntax."
+    
+    if verbose_reasoning:
+        reasoning_instruction = """STEP-BY-STEP REASONING:
+Before generating SQL, think through the problem step-by-step:
+1. Understand what the user is asking for
+2. Identify which tables contain the relevant data
+3. Identify which columns to select and any conditions needed
+4. Plan any joins or aggregations required
+5. Then write the SQL query
+
+Show this reasoning in the LOGIC section."""
+    else:
+        reasoning_instruction = ""
+    
     return f"""You are a SQL assistant. The database uses {db_note}
 
 STRICT RULES:
@@ -100,15 +249,35 @@ STRICT RULES:
 - Never use INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, or TRUNCATE.
 - If asked to modify data, set SQL to: N/A
 - Column names with spaces must be wrapped in double quotes.
+- You MAY compute derived/calculated columns inside SELECT using expressions and aliases, e.g. SELECT name, profit - cost AS margin FROM t
+- RANKING RULES:
+  - If asked for "all", "show all", or no limit: Use RANK() for ranking. Entities with equal values get the SAME rank. Example: if two products have same score, both get rank 1, next gets rank 3.
+  - If asked for "top N", "first N", "N best": First rank all entities using RANK() (ties get same rank), then apply LIMIT N to get the top N results.
+  - For SINGLE metric ranking (e.g. "rank by revenue", "sort by score"): Use RANK() OVER (ORDER BY col DESC/ASC) AS rank.
+  - CRITICAL: For MULTIPLE metric ranking (keywords: "and", "both", "together", "considering", "combined", "high X and high Y", "best in both", "rank by X and Y"), you MUST use a CTE to compute RANK() per metric separately, average them as combined_rank, then ORDER BY combined_rank. NEVER just ORDER BY one metric — you must combine both. Use the ACTUAL column names from the schema below.
+  - DO NOT use ROW_NUMBER() for ranking — it doesn't handle ties correctly. Use RANK() instead.
+  Example patterns:
+  Intent: "rank all products by revenue"
+  SQL: SELECT name, revenue, RANK() OVER (ORDER BY revenue DESC) AS rank FROM products
+  Intent: "top 5 products by revenue"
+  SQL: SELECT name, revenue, RANK() OVER (ORDER BY revenue DESC) AS rank FROM products ORDER BY revenue DESC LIMIT 5
+  Intent: "rank by score and revenue together, top 5"
+  SQL: WITH r AS (SELECT name, score, revenue, RANK() OVER (ORDER BY score DESC) AS score_rank, RANK() OVER (ORDER BY revenue DESC) AS rev_rank FROM t), combined AS (SELECT *, (score_rank + rev_rank) / 2.0 AS combined_rank FROM r ORDER BY combined_rank) SELECT name, score, revenue, score_rank, rev_rank, RANK() OVER (ORDER BY combined_rank ASC) AS rank FROM combined LIMIT 5
+  Intent: "high revenue and high trend score, top 5"
+  SQL: WITH r AS (SELECT name, revenue, trend_score, RANK() OVER (ORDER BY revenue DESC) AS revenue_rank, RANK() OVER (ORDER BY trend_score DESC) AS trend_rank FROM t), combined AS (SELECT *, (revenue_rank + trend_rank) / 2.0 AS combined_rank FROM r ORDER BY combined_rank) SELECT name, revenue, trend_score, revenue_rank, trend_rank, RANK() OVER (ORDER BY combined_rank ASC) AS rank FROM combined LIMIT 5
 - Respond EXACTLY in the format below — no markdown, no extra text.
 
-LOGIC: <one or two sentences explaining the approach>
+{reasoning_instruction}
+
+LOGIC: <one sentence only — keep it brief>
 SQL: <the SELECT query, no trailing semicolon>
 
 DATABASE SCHEMA:
 {schema}
 
-User Question: {question}"""
+User Question: {question}
+
+{error_context}"""
 
 
 def call_ollama(prompt: str, model: str, base_url: str) -> str:
@@ -127,15 +296,22 @@ def call_gemini(prompt: str, model: str, api_key: str) -> str:
     headers = {"Content-Type": "application/json", "X-goog-api-key": api_key}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 512, "temperature": 0.1}
+        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.1}
     }
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-    if response.status_code == 429:
-        raise RuntimeError("⏳ Gemini rate limit hit (free tier: 15 req/min). Wait a few seconds and click Run again.")
-    if response.status_code in (400, 403, 404):
-        raise RuntimeError(f"Gemini error: {response.json().get('error', {}).get('message', response.text)}")
-    response.raise_for_status()
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        if response.status_code == 429:
+            raise RuntimeError("⏳ Gemini rate limit hit (free tier: 15 req/min). Wait a few seconds and click Run again.")
+        if response.status_code in (400, 403, 404):
+            raise RuntimeError(f"Gemini error: {response.json().get('error', {}).get('message', response.text)}")
+        if response.status_code in (500, 503):
+            if attempt < max_attempts:
+                time.sleep(3 ** attempt)
+                continue
+            raise RuntimeError(f"⚠️ Gemini service unavailable after {max_attempts} retries. Google's API is temporarily down — try again in a moment.")
+        response.raise_for_status()
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def call_huggingface(prompt: str, model: str, token: str) -> str:
@@ -162,10 +338,28 @@ def call_huggingface(prompt: str, model: str, token: str) -> str:
 
 
 def parse_llm_response(text: str):
-    logic_match = re.search(r"LOGIC:\s*(.+?)(?=\nSQL:|\Z)", text, re.DOTALL | re.IGNORECASE)
-    sql_match = re.search(r"SQL:\s*(SELECT[\s\S]+?)(?:\s*$)", text, re.IGNORECASE)
+    # Strip markdown code fences (```sql ... ``` or ``` ... ```)
+    clean = re.sub(r"```(?:sql)?", "", text, flags=re.IGNORECASE)
+    clean = clean.replace("```", "")
+
+    # Extract LOGIC section
+    logic_match = re.search(r"LOGIC:\s*(.+?)(?=SQL:|\Z)", clean, re.DOTALL | re.IGNORECASE)
     logic = logic_match.group(1).strip() if logic_match else ""
-    sql = sql_match.group(1).strip().rstrip(";") if sql_match else ""
+
+    # Extract SQL: grab everything after the SQL: label, then find first SELECT or WITH
+    sql = ""
+    sql_label = re.search(r"SQL:\s*([\s\S]*)", clean, re.IGNORECASE)
+    if sql_label:
+        after_label = sql_label.group(1).strip()
+        sql_start = re.search(r"\b(SELECT|WITH)\b", after_label, re.IGNORECASE)
+        if sql_start:
+            sql = after_label[sql_start.start():].strip().rstrip(";")
+
+    # Fallback: scan the whole response for any SELECT/WITH if SQL: label was absent
+    if not sql:
+        sql_start = re.search(r"\b(SELECT|WITH)\b[\s\S]+", clean, re.IGNORECASE)
+        sql = sql_start.group(0).strip().rstrip(";") if sql_start else ""
+
     return logic, sql
 
 
@@ -187,13 +381,15 @@ with st.sidebar:
     mode = st.radio(
         "Choose your data source",
         ["🗄️ PostgreSQL / Greenplum", "📊 Excel / CSV File"],
-        index=0
+        index=1
     )
 
     st.divider()
 
     # ── Greenplum mode ──
     if mode == "🗄️ PostgreSQL / Greenplum":
+        st.info("🚧 **PostgreSQL / Greenplum support is coming soon!**\n\nWe're actively working on this feature. For now, please use **Excel / CSV File** to get started.", icon="🔧")
+        st.stop()
         st.subheader("🔌 Connection Settings")
         _s = st.secrets
         db_host = st.text_input("Host", value=_s.get("db_host", "localhost"))
@@ -278,46 +474,62 @@ with st.sidebar:
 
     # ── Excel / CSV mode ──
     else:
-        st.subheader("📁 Upload Your File")
-        uploaded_file = st.file_uploader(
-            "Choose a file",
-            type=["xlsx", "xls", "csv"],
-            help="Supports Excel (.xlsx, .xls) and CSV files"
-        )
+        st.markdown("""
+<div style="background:#e0f2fe; border-radius:12px; padding:1rem 1.1rem; border:1px solid #7dd3fc; margin-bottom:0.8rem;">
+  <div style="font-size:1rem; font-weight:700; color:#0c1a3a; margin-bottom:0.3rem;">� Upload Your Data File</div>
+  <div style="font-size:0.85rem; color:#0c1a3a; line-height:1.5;">
+    Supports <strong>Excel (.xlsx, .xls)</strong> and <strong>CSV</strong> files.<br>
+    Multi-sheet Excel files are fully supported — each sheet becomes a queryable table.
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        with st.container(border=True):
+            uploaded_files = st.file_uploader(
+                "Choose files",
+                type=["xlsx", "xls", "csv"],
+                accept_multiple_files=True,
+                label_visibility="collapsed"
+            )
 
-        if uploaded_file is not None:
+        if uploaded_files:
             try:
-                file_name = uploaded_file.name
+                all_sheets = {}
+                for uploaded_file in uploaded_files:
+                    file_name = uploaded_file.name
+                    file_base = re.sub(r"[^a-zA-Z0-9_]", "_", file_name.rsplit(".", 1)[0]).lower()
 
-                if file_name.endswith(".csv"):
-                    df = pd.read_csv(uploaded_file)
-                    table_name = re.sub(r"[^a-zA-Z0-9_]", "_", file_name.replace(".csv", "")).lower()
-                    sheets = {table_name: df}
-                else:
-                    xls = pd.ExcelFile(uploaded_file)
-                    sheets = {}
-                    for sname in xls.sheet_names:
-                        tname = re.sub(r"[^a-zA-Z0-9_]", "_", sname).lower()
-                        sheets[tname] = pd.read_excel(uploaded_file, sheet_name=sname)
-                    table_name = list(sheets.keys())[0]
-                    df = sheets[table_name]
+                    if file_name.endswith(".csv"):
+                        df = pd.read_csv(uploaded_file)
+                        tname = file_base
+                        # avoid name collisions across files
+                        if tname in all_sheets:
+                            tname = f"{tname}_2"
+                        all_sheets[tname] = df
+                    else:
+                        xls = pd.ExcelFile(uploaded_file)
+                        for sname in xls.sheet_names:
+                            tname = re.sub(r"[^a-zA-Z0-9_]", "_", sname).lower()
+                            if tname in all_sheets:
+                                tname = f"{file_base}_{tname}"
+                            all_sheets[tname] = pd.read_excel(uploaded_file, sheet_name=sname)
 
-                st.session_state.excel_sheets = sheets
-                st.session_state.excel_df = df
-                st.session_state.excel_table_name = table_name
+                first_table = list(all_sheets.keys())[0]
+                st.session_state.excel_sheets = all_sheets
+                st.session_state.excel_df = all_sheets[first_table]
+                st.session_state.excel_table_name = first_table
                 st.session_state.schema_text = "\n\n".join(
-                    build_schema_from_df(sdf, sname) for sname, sdf in sheets.items()
+                    build_schema_from_df(sdf, sname) for sname, sdf in all_sheets.items()
                 )
                 st.session_state.data_source = "excel"
                 st.session_state.conn = None
 
-                total_rows = sum(len(s) for s in sheets.values())
-                st.success(f"✅ Loaded {len(sheets)} sheet(s) — {total_rows:,} total rows")
+                total_rows = sum(len(s) for s in all_sheets.values())
+                st.success(f"✅ Loaded **{len(uploaded_files)} file(s)** → **{len(all_sheets)} table(s)** — {total_rows:,} total rows")
 
-                with st.expander("📐 View Schema (all sheets)"):
+                with st.expander("📐 View Schema (all tables)"):
                     st.text(st.session_state.schema_text)
 
-                for sname, sdf in sheets.items():
+                for sname, sdf in all_sheets.items():
                     with st.expander(f"👁️ Preview: {sname} (first 5 rows)"):
                         st.dataframe(sdf.head(), use_container_width=True)
 
@@ -360,26 +572,67 @@ with st.sidebar:
         llm_model = st.secrets.get("ollama_model", "llama3")
         st.caption(f"URL: `{ollama_url}` | Model: `{llm_model}`")
 
+    verbose_reasoning = st.checkbox("Enable verbose reasoning (step-by-step thinking)", value=False, help="Show detailed LLM reasoning before SQL generation")
+    debug_raw = st.checkbox("🔬 Show raw LLM response (debug)", value=False, help="Display the exact text returned by the LLM")
+
+    # ── Saved Queries panel ──
+    st.markdown("---")
+    st.markdown("### ⭐ Saved Queries")
+    if st.session_state.saved_queries:
+        for idx, sq in enumerate(st.session_state.saved_queries):
+            col_sq, col_del = st.columns([5, 1])
+            with col_sq:
+                if st.button(f"▶ {sq['name']}", key=f"sq_use_{idx}", use_container_width=True, help=sq["question"]):
+                    st.session_state.prefill_question = sq["question"]
+                    st.rerun()
+            with col_del:
+                if st.button("✕", key=f"sq_del_{idx}", help="Remove"):
+                    st.session_state.saved_queries.pop(idx)
+                    _save_json(SAVED_FILE, st.session_state.saved_queries)
+                    st.rerun()
+    else:
+        st.caption("No saved queries yet. Run a query and click ⭐ Save.")
+
 # ─── Main UI ──────────────────────────────────────────────────────────────────
-st.title("🗄️ SQL Agent")
-st.caption("Ask questions in plain English — works with PostgreSQL, Greenplum, or Excel/CSV.")
+st.markdown("""
+<div class="hero-banner">
+    <h1>QueryMind</h1>
+    <p>Ask questions in plain English &mdash; instantly converted to SQL and executed on your data.</p>
+</div>
+""", unsafe_allow_html=True)
 
-# Active source badge
+# ── Status + Metric cards ──
+_hist = st.session_state.history
+_tables = len(st.session_state.selected_tables) if st.session_state.data_source == "postgres" else len(st.session_state.excel_sheets)
+_queries = len(_hist)
+_last_rows = _hist[-1]["rows"] if _hist else "—"
+
+st.markdown(f"""
+<div class="metric-row">
+    <div class="metric-card"><div class="val">{_queries}</div><div class="lbl">Queries Run</div></div>
+    <div class="metric-card"><div class="val">{_tables}</div><div class="lbl">Tables Loaded</div></div>
+    <div class="metric-card"><div class="val">{_last_rows}</div><div class="lbl">Last Result Rows</div></div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Connection badge ──
 if st.session_state.data_source == "postgres":
-    st.info("🟢 **Mode: PostgreSQL / Greenplum** — queries run on live DB")
+    st.markdown('<span class="badge badge-green">🟢 PostgreSQL / Greenplum &nbsp;|&nbsp; Live DB</span>', unsafe_allow_html=True)
 elif st.session_state.data_source == "excel":
-    st.info(f"📊 **Mode: Excel / CSV** — table name: `{st.session_state.excel_table_name}`")
+    tname = st.session_state.excel_table_name
+    st.markdown(f'<span class="badge badge-blue">📊 Excel / CSV &nbsp;|&nbsp; {tname}</span>', unsafe_allow_html=True)
 else:
-    st.warning("⚠️ No data source connected. Choose one in the sidebar.")
+    st.markdown('<span class="badge badge-orange">⚠️ No data source connected — choose one in the sidebar</span>', unsafe_allow_html=True)
 
-st.markdown("---")
+st.markdown("<br>", unsafe_allow_html=True)
 
+_prefill = st.session_state.prefill_question
+st.session_state.prefill_question = ""   # clear after use
 question = st.text_area(
     "Your Question",
+    value=_prefill,
     placeholder=(
-        "e.g.  How many unique accounts do I have in EMEA?\n"
-        "       How many unique accounts have a domain name?\n"
-        "       How many unique accounts have a local name?"
+        "write your question here..."
     ),
     height=90
 )
@@ -412,24 +665,80 @@ if run_btn:
                 st.markdown(f"**Table `{tname}` has {len(df_meta):,} rows.**")
                 st.stop()
 
-        # Step 1 – Generate SQL via LLM
+        # Step 1 – Detect multi-step questions (require strong sequential signals)
+        q_low = question.lower()
+        strong_multi_step = ["then get", "then find", "then show", "after that", "and then", "followed by", "next get", "next find"]
+        is_multi_step = any(kw in q_low for kw in strong_multi_step)
+        
+        # Step 2 – Generate SQL via LLM
         provider_label = llm_provider.split("(")[0].strip()
         with st.spinner(f"Generating SQL with {provider_label} ({llm_model})..."):
             try:
-                prompt = build_prompt(st.session_state.schema_text, question, st.session_state.data_source)
-                if llm_provider == "Gemini (free API)":
-                    if not gemini_key:
-                        st.error("Please enter your Gemini API key in the sidebar.")
-                        st.stop()
-                    raw_response = call_gemini(prompt, llm_model, gemini_key)
-                elif llm_provider == "HuggingFace (free API)":
-                    if not hf_token:
-                        st.error("Please enter your HuggingFace token in the sidebar.")
-                        st.stop()
-                    raw_response = call_huggingface(prompt, llm_model, hf_token)
+                if is_multi_step:
+                    # Multi-step: ask LLM to break down into sequential queries
+                    planning_prompt = f"""You are a query planner. Break this complex question into at most 3 sequential SQL queries.
+
+Question: {question}
+
+Database Schema:
+{st.session_state.schema_text}
+
+Respond with each query on a new line, numbered like:
+1. SELECT ...
+2. SELECT ...
+3. SELECT ...
+
+Each query should build on the previous if needed."""
+                    
+                    if llm_provider == "Gemini (free API)":
+                        raw_plan = call_gemini(planning_prompt, llm_model, gemini_key)
+                    elif llm_provider == "HuggingFace (free API)":
+                        raw_plan = call_huggingface(planning_prompt, llm_model, hf_token)
+                    else:
+                        raw_plan = call_ollama(planning_prompt, llm_model, ollama_url)
+                    
+                    # Parse the plan into individual queries
+                    queries = []
+                    for line in raw_plan.split('\n'):
+                        line = line.strip()
+                        if line and (line[0].isdigit() or 'SELECT' in line.upper()):
+                            # Remove numbering and clean
+                            clean = re.sub(r'^\d+[\.\)]\s*', '', line)
+                            if 'SELECT' in clean.upper():
+                                queries.append(clean)
+                    
+                    if not queries:
+                        # Fallback to single query generation
+                        prompt = build_prompt(st.session_state.schema_text, question, st.session_state.data_source, verbose_reasoning=verbose_reasoning)
+                        if llm_provider == "Gemini (free API)":
+                            raw_response = call_gemini(prompt, llm_model, gemini_key)
+                        elif llm_provider == "HuggingFace (free API)":
+                            raw_response = call_huggingface(prompt, llm_model, hf_token)
+                        else:
+                            raw_response = call_ollama(prompt, llm_model, ollama_url)
+                        logic, sql = parse_llm_response(raw_response)
+                        queries = [sql]
+                        st.info("🤖 Multi-step planning not available, using single query.")
                 else:
-                    raw_response = call_ollama(prompt, llm_model, ollama_url)
-                logic, sql = parse_llm_response(raw_response)
+                    # Single query generation
+                    prompt = build_prompt(st.session_state.schema_text, question, st.session_state.data_source, verbose_reasoning=verbose_reasoning)
+                    if llm_provider == "Gemini (free API)":
+                        if not gemini_key:
+                            st.error("Please enter your Gemini API key in the sidebar.")
+                            st.stop()
+                        raw_response = call_gemini(prompt, llm_model, gemini_key)
+                    elif llm_provider == "HuggingFace (free API)":
+                        if not hf_token:
+                            st.error("Please enter your HuggingFace token in the sidebar.")
+                            st.stop()
+                        raw_response = call_huggingface(prompt, llm_model, hf_token)
+                    else:
+                        raw_response = call_ollama(prompt, llm_model, ollama_url)
+                    logic, sql = parse_llm_response(raw_response)
+                    queries = [sql]
+                    if debug_raw:
+                        with st.expander("🔬 Raw LLM Response"):
+                            st.text(raw_response)
             except requests.exceptions.ConnectionError as e:
                 if llm_provider == "Gemini (free API)":
                     st.error("Cannot reach Gemini API. Check your internet/proxy settings.")
@@ -467,56 +776,181 @@ if run_btn:
 
         # ── 2. SQL ──
         st.markdown('<p class="section-label">🔍 Generated SQL</p>', unsafe_allow_html=True)
-        if not sql or sql.upper() == "N/A":
+        if not queries or not queries[0] or queries[0].upper() == "N/A":
             st.info("No valid SELECT query was generated. " + (logic or ""))
         else:
-            st.code(sql, language="sql")
+            if len(queries) > 1:
+                st.markdown(f'<div class="agent-box">🤖 <strong>Multi-step execution</strong> — {len(queries)} sequential queries planned by agent</div>', unsafe_allow_html=True)
+                for i, q in enumerate(queries, 1):
+                    st.markdown(f'<span class="step-badge">Step {i}</span>', unsafe_allow_html=True)
+                    st.code(q, language="sql")
+            else:
+                st.code(queries[0], language="sql")
 
             # ── 3. Output ──
             st.markdown('<p class="section-label">📊 Output</p>', unsafe_allow_html=True)
             source_label = "PostgreSQL / Greenplum" if st.session_state.data_source == "postgres" else "Excel/CSV (in-memory SQLite)"
-            with st.spinner(f"Running query on {source_label}..."):
-                try:
-                    if st.session_state.data_source == "postgres":
-                        result_df = run_query_greenplum(st.session_state.conn, sql)
+            
+            all_results = []
+            for i, q in enumerate(queries, 1):
+                with st.spinner(f"Running query {i}/{len(queries)} on {source_label}..."):
+                    try:
+                        if st.session_state.data_source == "postgres":
+                            result_df = run_query_greenplum(st.session_state.conn, q)
+                        else:
+                            result_df = run_query_excel(st.session_state.excel_sheets, q)
+                        all_results.append(result_df)
+                        if len(queries) > 1:
+                            st.markdown(f"**Step {i} Result:**")
+                            st.dataframe(result_df, use_container_width=True)
+                            st.caption(f"✅ {len(result_df)} row(s) returned")
+                    except Exception as exec_err:
+                        # Agentic: Auto-fix SQL errors
+                        st.error(f"❌ Query {i} failed: {exec_err}")
+                        st.markdown('<div class="agent-box">🔄 <strong>Agent activated</strong> — analyzing error and attempting automatic fix...</div>', unsafe_allow_html=True)
+                        st.session_state.error_log.append({
+                            "time": datetime.now().strftime("%H:%M:%S"),
+                            "question": question,
+                            "error": str(exec_err),
+                            "sql": q
+                        })
+                        fixed_result = None
+                        for attempt in range(1, 3):
+                            with st.spinner(f"Retry {attempt}/2: Regenerating SQL..."):
+                                try:
+                                    error_context = f"PREVIOUS ATTEMPT FAILED.\nError: {exec_err}\nPrevious SQL:\n{q}\n\nFix it to resolve this error."
+                                    fix_prompt = build_prompt(st.session_state.schema_text, question, st.session_state.data_source, error_context, verbose_reasoning)
+                                    if llm_provider == "Gemini (free API)":
+                                        raw_fix = call_gemini(fix_prompt, llm_model, gemini_key)
+                                    elif llm_provider == "HuggingFace (free API)":
+                                        raw_fix = call_huggingface(fix_prompt, llm_model, hf_token)
+                                    else:
+                                        raw_fix = call_ollama(fix_prompt, llm_model, ollama_url)
+                                    _, fixed_sql = parse_llm_response(raw_fix)
+                                    if st.session_state.data_source == "postgres":
+                                        fixed_result = run_query_greenplum(st.session_state.conn, fixed_sql)
+                                    else:
+                                        fixed_result = run_query_excel(st.session_state.excel_sheets, fixed_sql)
+                                    st.success(f"✅ Fixed on attempt {attempt}/2!")
+                                    st.code(fixed_sql, language="sql")
+                                    all_results.append(fixed_result)
+                                    break
+                                except Exception as retry_err:
+                                    if attempt == 2:
+                                        st.error(f"❌ Could not fix after 2 attempts: {retry_err}")
+                                        st.info("Try rephrasing your question or selecting different tables.")
+                        if fixed_result is None:
+                            all_results.append(None)
+            
+            # Combine results for single-query display or show final result
+            result_df = all_results[-1] if all_results[-1] is not None else all_results[0]
+            if len(queries) == 1:
+                st.dataframe(result_df, use_container_width=True)
+                st.caption(f"✅ {len(result_df)} row(s) returned")
+            
+            # Agentic: Result validation
+            validation_warnings = []
+            q_low = question.lower()
+            
+            # Check for empty results when question implies data should exist
+            if len(result_df) == 0:
+                if any(kw in q_low for kw in ["show", "list", "get", "find", "display", "all", "every"]):
+                    validation_warnings.append("⚠️ No results returned, but question suggests data should exist. Consider checking spelling or table selection.")
+            
+            # Check for suspicious patterns
+            if len(result_df) > 0:
+                # Check if all values are null in key columns
+                non_id_cols = [c for c in result_df.columns if "id" not in c.lower()]
+                if non_id_cols and result_df[non_id_cols].isnull().all().all():
+                    validation_warnings.append("⚠️ All non-ID columns are null — possible join issue or missing data.")
+            
+            # Display warnings
+            if validation_warnings:
+                st.warning("\n".join(validation_warnings))
+                if st.button("🔄 Retry with different approach", key=f"retry_{len(st.session_state.history)}"):
+                    st.rerun()
+
+            # ── Export row ──
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            exp_col1, exp_col2, exp_col3, exp_col4 = st.columns([2, 2, 2, 3])
+
+            with exp_col1:
+                st.download_button(
+                    "⬇️ CSV",
+                    data=result_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"result_{ts}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            with exp_col2:
+                _xls = io.BytesIO()
+                result_df.to_excel(_xls, index=False, engine="openpyxl")
+                st.download_button(
+                    "⬇️ Excel",
+                    data=_xls.getvalue(),
+                    file_name=f"result_{ts}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            with exp_col3:
+                st.download_button(
+                    "⬇️ JSON",
+                    data=result_df.to_json(orient="records", indent=2).encode("utf-8"),
+                    file_name=f"result_{ts}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            with exp_col4:
+                save_name = st.text_input("Save as…", placeholder="e.g. Top 5 products by rank", key=f"save_name_{ts}", label_visibility="collapsed")
+                if st.button("⭐ Save Query", key=f"save_btn_{ts}", use_container_width=True):
+                    if save_name.strip():
+                        entry = {"name": save_name.strip(), "question": question, "sql": queries[0], "logic": logic}
+                        st.session_state.saved_queries.append(entry)
+                        _save_json(SAVED_FILE, st.session_state.saved_queries)
+                        st.success(f"Saved as **{save_name}**!")
                     else:
-                        result_df = run_query_excel(
-                            st.session_state.excel_sheets,
-                            sql
-                        )
+                        st.warning("Enter a name before saving.")
 
-                    st.dataframe(result_df, use_container_width=True)
-                    st.caption(f"✅ {len(result_df)} row(s) returned")
+            st.session_state.history.append({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "question": question,
+                "logic": logic,
+                "sql": queries[0],
+                "rows": len(result_df),
+                "source": st.session_state.data_source
+            })
+            _save_json(HISTORY_FILE, st.session_state.history[-200:])
 
-                    csv_bytes = result_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="⬇️ Download CSV",
-                        data=csv_bytes,
-                        file_name=f"query_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-
-                    st.session_state.history.append({
-                        "time": datetime.now().strftime("%H:%M:%S"),
-                        "question": question,
-                        "logic": logic,
-                        "sql": sql,
-                        "rows": len(result_df),
-                        "source": st.session_state.data_source
-
-                    })
-
-                except Exception as e:
-                    st.error(f"Query execution error: {e}")
-                    st.info("The generated SQL may reference columns that don't exist. Try rephrasing your question.")
 
 # ─── Query History ────────────────────────────────────────────────────────────
 if st.session_state.history:
     st.markdown("---")
-    st.subheader("📜 Query History")
-    for item in reversed(st.session_state.history[-15:]):
+    col_h1, col_h2 = st.columns([4, 1])
+    with col_h1:
+        st.subheader("📜 Query History")
+    with col_h2:
+        if st.button("🗑️ Clear History", use_container_width=True):
+            st.session_state.history = []
+            st.session_state.error_log = []
+            _save_json(HISTORY_FILE, [])
+            st.rerun()
+    for hidx, item in enumerate(reversed(st.session_state.history[-15:])):
         source_icon = "🗄️" if item.get("source") == "postgres" else "📊"
-        with st.expander(f"{source_icon} [{item['time']}]  {item['question'][:85]}"):
+        auto_fixed = "auto-fixed" in item.get("logic", "").lower()
+        fix_tag = " 🔧" if auto_fixed else ""
+        with st.expander(f"{source_icon} [{item['time']}]  {item['question'][:80]}{fix_tag}"):
             st.markdown(f"**Logic:** {item['logic']}")
             st.code(item["sql"], language="sql")
-            st.caption(f"{item['rows']} row(s) returned")
+            st.caption(f"✅ {item['rows']} row(s) returned &nbsp;|&nbsp; Source: {item.get('source','')}")
+            if st.button("↩ Reuse this query", key=f"reuse_{hidx}"):
+                st.session_state.prefill_question = item["question"]
+                st.rerun()
+
+# ─── Error Log ────────────────────────────────────────────────────────────────
+if st.session_state.error_log:
+    with st.expander(f"⚠️ Agent Error Log ({len(st.session_state.error_log)} event(s))"):
+        for err in reversed(st.session_state.error_log[-10:]):
+            st.markdown(f"**[{err['time']}]** `{err['question'][:60]}`")
+            st.error(f"Error: {err['error']}")
+            if err.get("sql"):
+                st.code(err["sql"], language="sql")
