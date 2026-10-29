@@ -13,6 +13,16 @@ env/
 # ─── Sample / test data ───────────────────────────────────────────────────────
 sample_data.xlsx
 
+# ─── Runtime persistence (ephemeral, don't commit) ───────────────────────────
+query_history.json
+saved_queries.json
+
+# ─── Streamlit config (machine-specific) ──────────────────────────────────────
+.streamlit/config.toml
+
+# ─── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+
 # ─── OS clutter ───────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

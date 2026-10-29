@@ -215,7 +215,29 @@ def dtype_to_sql(dtype) -> str:
 
 def build_schema_from_df(df: pd.DataFrame, table_name: str) -> str:
     cols = ", ".join(f"{col} ({dtype_to_sql(dtype)})" for col, dtype in zip(df.columns, df.dtypes))
-    return f"Table: {table_name}\nColumns: {cols}"
+    
+    # Add sample data hints (first 2 rows, limited to 50 chars per value)
+    sample_hints = []
+    for _, row in df.head(2).iterrows():
+        sample_values = []
+        for col in df.columns:
+            val = row[col]
+            if pd.isna(val):
+                sample_values.append("NULL")
+            elif isinstance(val, (int, float)):
+                sample_values.append(str(val)[:20])
+            else:
+                sample_values.append(str(val)[:50])
+        sample_hints.append(f"Sample: {', '.join(sample_values)}")
+    
+    sample_section = "\n".join(sample_hints) if sample_hints else ""
+    schema = f"Table: {table_name}\nColumns: {cols}\n{sample_section}"
+    
+    # Truncate if too long (keep under 2000 chars per table)
+    if len(schema) > 2000:
+        schema = schema[:2000] + "\n... (truncated)"
+    
+    return schema
 
 
 def build_prompt(schema: str, question: str, data_source: str = "postgres", error_context: str = "", verbose_reasoning: bool = False) -> str:
@@ -238,44 +260,54 @@ Before generating SQL, think through the problem step-by-step:
 4. Plan any joins or aggregations required
 5. Then write the SQL query
 
-Show this reasoning in the LOGIC section."""
+Show this reasoning in the LOGIC section. Ensure the logic accurately reflects the SQL query you generate."""
     else:
         reasoning_instruction = ""
     
-    return f"""You are a SQL assistant. The database uses {db_note}
+    return f"""You are an expert SQL assistant. Convert natural language questions to SQL queries.
 
-STRICT RULES:
-- Only generate SELECT queries.
-- Never use INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, or TRUNCATE.
-- If asked to modify data, set SQL to: N/A
-- Column names with spaces must be wrapped in double quotes.
-- You MAY compute derived/calculated columns inside SELECT using expressions and aliases, e.g. SELECT name, profit - cost AS margin FROM t
-- RANKING RULES:
-  - If asked for "all", "show all", or no limit: Use RANK() for ranking. Entities with equal values get the SAME rank. Example: if two products have same score, both get rank 1, next gets rank 3.
-  - If asked for "top N", "first N", "N best": First rank all entities using RANK() (ties get same rank), then apply LIMIT N to get the top N results.
-  - For SINGLE metric ranking (e.g. "rank by revenue", "sort by score"): Use RANK() OVER (ORDER BY col DESC/ASC) AS rank.
-  - CRITICAL: For MULTIPLE metric ranking (keywords: "and", "both", "together", "considering", "combined", "high X and high Y", "best in both", "rank by X and Y"), you MUST use a CTE to compute RANK() per metric separately, average them as combined_rank, then ORDER BY combined_rank. NEVER just ORDER BY one metric — you must combine both. Use the ACTUAL column names from the schema below.
-  - DO NOT use ROW_NUMBER() for ranking — it doesn't handle ties correctly. Use RANK() instead.
-  Example patterns:
-  Intent: "rank all products by revenue"
-  SQL: SELECT name, revenue, RANK() OVER (ORDER BY revenue DESC) AS rank FROM products
-  Intent: "top 5 products by revenue"
-  SQL: SELECT name, revenue, RANK() OVER (ORDER BY revenue DESC) AS rank FROM products ORDER BY revenue DESC LIMIT 5
-  Intent: "rank by score and revenue together, top 5"
-  SQL: WITH r AS (SELECT name, score, revenue, RANK() OVER (ORDER BY score DESC) AS score_rank, RANK() OVER (ORDER BY revenue DESC) AS rev_rank FROM t), combined AS (SELECT *, (score_rank + rev_rank) / 2.0 AS combined_rank FROM r ORDER BY combined_rank) SELECT name, score, revenue, score_rank, rev_rank, RANK() OVER (ORDER BY combined_rank ASC) AS rank FROM combined LIMIT 5
-  Intent: "high revenue and high trend score, top 5"
-  SQL: WITH r AS (SELECT name, revenue, trend_score, RANK() OVER (ORDER BY revenue DESC) AS revenue_rank, RANK() OVER (ORDER BY trend_score DESC) AS trend_rank FROM t), combined AS (SELECT *, (revenue_rank + trend_rank) / 2.0 AS combined_rank FROM r ORDER BY combined_rank) SELECT name, revenue, trend_score, revenue_rank, trend_rank, RANK() OVER (ORDER BY combined_rank ASC) AS rank FROM combined LIMIT 5
-- Respond EXACTLY in the format below — no markdown, no extra text.
+DATABASE TYPE: {db_note}
+
+CORE PRINCIPLES:
+1. Use the SIMPLEST possible SQL that answers the question
+2. Prefer basic SELECT, WHERE, JOIN, GROUP BY over complex CTEs
+3. Only use window functions (RANK, OVER) when explicitly asked for ranking
+4. Column names with spaces MUST be wrapped in double quotes
+5. Only generate SELECT queries - never INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE
+
+SIMPLE QUERY EXAMPLES:
+Q: "Show all customers"
+SQL: SELECT * FROM customers
+
+Q: "Get orders where amount > 1000"
+SQL: SELECT * FROM orders WHERE amount > 1000
+
+Q: "Count total revenue by category"
+SQL: SELECT category, SUM(revenue) as total FROM sales GROUP BY category
+
+Q: "Join customers with their orders"
+SQL: SELECT c.name, o.order_id FROM customers c JOIN orders o ON c.id = o.customer_id
+
+RANKING (only when asked):
+Q: "Rank products by revenue"
+SQL: SELECT name, revenue, RANK() OVER (ORDER BY revenue DESC) AS rank FROM products
+
+Q: "Top 5 by revenue"
+SQL: SELECT name, revenue FROM products ORDER BY revenue DESC LIMIT 5
+
+Q: "Rank by score AND revenue together (multi-metric)"
+SQL: WITH r AS (SELECT name, score, revenue, RANK() OVER (ORDER BY score DESC) AS score_rank, RANK() OVER (ORDER BY revenue DESC) AS rev_rank FROM products), combined AS (SELECT *, (score_rank + rev_rank) / 2.0 AS combined_rank FROM r ORDER BY combined_rank) SELECT name, score, revenue, score_rank, rev_rank, RANK() OVER (ORDER BY combined_rank ASC) AS rank FROM combined LIMIT 5
 
 {reasoning_instruction}
 
-LOGIC: <one sentence only — keep it brief>
+OUTPUT FORMAT:
+LOGIC: <clear explanation of what the query does>
 SQL: <the SELECT query, no trailing semicolon>
 
 DATABASE SCHEMA:
 {schema}
 
-User Question: {question}
+USER QUESTION: {question}
 
 {error_context}"""
 
@@ -284,7 +316,15 @@ def call_ollama(prompt: str, model: str, base_url: str) -> str:
     url = f"{base_url.rstrip('/')}/api/generate"
     response = requests.post(
         url,
-        json={"model": model, "prompt": prompt, "stream": False},
+        json={
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 2048
+            }
+        },
         timeout=180
     )
     response.raise_for_status()
@@ -296,7 +336,12 @@ def call_gemini(prompt: str, model: str, api_key: str) -> str:
     headers = {"Content-Type": "application/json", "X-goog-api-key": api_key}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.1}
+        "generationConfig": {
+            "maxOutputTokens": 4096,
+            "temperature": 0.0,
+            "topP": 0.8,
+            "topK": 40
+        }
     }
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
@@ -320,9 +365,10 @@ def call_huggingface(prompt: str, model: str, token: str) -> str:
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 512,
+            "max_new_tokens": 1024,
             "return_full_text": False,
-            "temperature": 0.1
+            "temperature": 0.1,
+            "top_p": 0.9
         }
     }
     response = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -355,10 +401,21 @@ def parse_llm_response(text: str):
         if sql_start:
             sql = after_label[sql_start.start():].strip().rstrip(";")
 
-    # Fallback: scan the whole response for any SELECT/WITH if SQL: label was absent
+    # Fallback 1: scan the whole response for any SELECT/WITH if SQL: label was absent
     if not sql:
         sql_start = re.search(r"\b(SELECT|WITH)\b[\s\S]+", clean, re.IGNORECASE)
         sql = sql_start.group(0).strip().rstrip(";") if sql_start else ""
+
+    # Fallback 2: if SQL has multiple statements, take only the first one
+    if sql:
+        # Split on semicolon and take first statement
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        if statements:
+            sql = statements[0]
+
+    # Validation: ensure SQL starts with SELECT or WITH
+    if sql and not re.match(r"^\s*(SELECT|WITH)", sql, re.IGNORECASE):
+        sql = ""
 
     return logic, sql
 
@@ -403,7 +460,7 @@ with st.sidebar:
             help="Comma-separated for multiple schemas, e.g. public, sales, crm"
         )
 
-        if st.button("Connect & Load Schema", type="primary", use_container_width=True):
+        if st.button("Connect & Load Schema", type="primary", width='stretch'):
             try:
                 with st.spinner("Connecting..."):
                     conn = psycopg2.connect(
@@ -445,7 +502,11 @@ with st.sidebar:
                                     f"{r['column_name']} ({r['data_type']})"
                                     for _, r in grp.iterrows()
                                 )
-                                lines.append(f"Table: {qname}\nColumns: {cols}")
+                                schema = f"Table: {qname}\nColumns: {cols}"
+                                # Truncate if too long
+                                if len(schema) > 2000:
+                                    schema = schema[:2000] + "\n... (truncated)"
+                                lines.append(schema)
                             return "\n\n".join(lines)
 
                         st.session_state.schema_text = _build_pg_schema(schema_df, all_tables)
@@ -531,7 +592,7 @@ with st.sidebar:
 
                 for sname, sdf in all_sheets.items():
                     with st.expander(f"👁️ Preview: {sname} (first 5 rows)"):
-                        st.dataframe(sdf.head(), use_container_width=True)
+                        st.dataframe(sdf.head(), width='stretch')
 
             except Exception as e:
                 st.error(f"Failed to read file: {e}")
@@ -582,7 +643,7 @@ with st.sidebar:
         for idx, sq in enumerate(st.session_state.saved_queries):
             col_sq, col_del = st.columns([5, 1])
             with col_sq:
-                if st.button(f"▶ {sq['name']}", key=f"sq_use_{idx}", use_container_width=True, help=sq["question"]):
+                if st.button(f"▶ {sq['name']}", key=f"sq_use_{idx}", width='stretch', help=sq["question"]):
                     st.session_state.prefill_question = sq["question"]
                     st.rerun()
             with col_del:
@@ -802,7 +863,7 @@ Each query should build on the previous if needed."""
                         all_results.append(result_df)
                         if len(queries) > 1:
                             st.markdown(f"**Step {i} Result:**")
-                            st.dataframe(result_df, use_container_width=True)
+                            st.dataframe(result_df, width='stretch')
                             st.caption(f"✅ {len(result_df)} row(s) returned")
                     except Exception as exec_err:
                         # Agentic: Auto-fix SQL errors
@@ -845,7 +906,7 @@ Each query should build on the previous if needed."""
             # Combine results for single-query display or show final result
             result_df = all_results[-1] if all_results[-1] is not None else all_results[0]
             if len(queries) == 1:
-                st.dataframe(result_df, use_container_width=True)
+                st.dataframe(result_df, width='stretch')
                 st.caption(f"✅ {len(result_df)} row(s) returned")
             
             # Agentic: Result validation
@@ -880,7 +941,7 @@ Each query should build on the previous if needed."""
                     data=result_df.to_csv(index=False).encode("utf-8"),
                     file_name=f"result_{ts}.csv",
                     mime="text/csv",
-                    use_container_width=True
+                    width='stretch'
                 )
             with exp_col2:
                 _xls = io.BytesIO()
@@ -890,7 +951,7 @@ Each query should build on the previous if needed."""
                     data=_xls.getvalue(),
                     file_name=f"result_{ts}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    width='stretch'
                 )
             with exp_col3:
                 st.download_button(
@@ -898,11 +959,11 @@ Each query should build on the previous if needed."""
                     data=result_df.to_json(orient="records", indent=2).encode("utf-8"),
                     file_name=f"result_{ts}.json",
                     mime="application/json",
-                    use_container_width=True
+                    width='stretch'
                 )
             with exp_col4:
                 save_name = st.text_input("Save as…", placeholder="e.g. Top 5 products by rank", key=f"save_name_{ts}", label_visibility="collapsed")
-                if st.button("⭐ Save Query", key=f"save_btn_{ts}", use_container_width=True):
+                if st.button("⭐ Save Query", key=f"save_btn_{ts}", width='stretch'):
                     if save_name.strip():
                         entry = {"name": save_name.strip(), "question": question, "sql": queries[0], "logic": logic}
                         st.session_state.saved_queries.append(entry)
@@ -929,7 +990,7 @@ if st.session_state.history:
     with col_h1:
         st.subheader("📜 Query History")
     with col_h2:
-        if st.button("🗑️ Clear History", use_container_width=True):
+        if st.button("🗑️ Clear History", width='stretch'):
             st.session_state.history = []
             st.session_state.error_log = []
             _save_json(HISTORY_FILE, [])
